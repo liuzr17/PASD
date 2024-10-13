@@ -20,8 +20,10 @@ from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor
 
+# 自己定义的pipeline
 from pasd.pipelines.pipeline_pasd import StableDiffusionControlNetPipeline
 from pasd.myutils.misc import load_dreambooth_lora
+# 颜色矫正
 from pasd.myutils.wavelet_color_fix import wavelet_color_fix
 #from annotator.retinaface import RetinaFaceDetection
 
