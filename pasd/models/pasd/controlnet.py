@@ -80,6 +80,7 @@ class ControlNetConditioningEmbedding(nn.Module):
 
         self.conv_in = nn.Conv2d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
 
+        # 预处理去除退化模块
         if self.use_rrdb:
             from basicsr.archs.rrdbnet_arch import RRDB
             num_rrdb_block = 2
@@ -94,7 +95,7 @@ class ControlNetConditioningEmbedding(nn.Module):
             channel_out = block_out_channels[i + 1]
             self.blocks.append(nn.Conv2d(channel_in, channel_in, kernel_size=3, padding=1))
             self.blocks.append(nn.Conv2d(channel_in, channel_out, kernel_size=3, padding=1, stride=2))
-
+            # 转为rgb3通道图像
             if return_rgbs:
                 self.to_rgbs.append(nn.Conv2d(channel_out, 3, kernel_size=3, padding=1)) # channel_in
 
@@ -113,7 +114,7 @@ class ControlNetConditioningEmbedding(nn.Module):
         for i, block in enumerate(self.blocks):
             embedding = block(embedding)
             embedding = F.silu(embedding)
-
+            # 变回3通道图像 进行l1损失监督
             if i%2 and self.return_rgbs: # 0
                 out_rgbs.append(self.to_rgbs[i//2](embedding))
 
