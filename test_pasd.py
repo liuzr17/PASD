@@ -35,6 +35,7 @@ check_min_version("0.18.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 def load_pasd_pipeline(args, accelerator, enable_xformers_memory_efficient_attention):
+    # 加载自定义的unet和controlnet
     if args.use_pasd_light:
         from pasd.models.pasd_light.unet_2d_condition import UNet2DConditionModel
         from pasd.models.pasd_light.controlnet import ControlNetModel
@@ -50,6 +51,7 @@ def load_pasd_pipeline(args, accelerator, enable_xformers_memory_efficient_atten
     tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_path, subfolder="tokenizer")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
     feature_extractor = CLIPImageProcessor.from_pretrained(f"{args.pretrained_model_path}/feature_extractor")
+    # unet和controlnet是自己训练的
     unet = UNet2DConditionModel.from_pretrained(args.pasd_model_path, subfolder="unet")
     controlnet = ControlNetModel.from_pretrained(args.pasd_model_path, subfolder="controlnet")
 
@@ -104,6 +106,8 @@ def load_pasd_pipeline(args, accelerator, enable_xformers_memory_efficient_atten
 
     return validation_pipeline
 
+# 加载high-level的预训练模型 分类、检测、caption模型
+# 返回预训练网络，预处理操作，其他信息
 def load_high_level_net(args, device='cuda'):
     if args.high_level_info == "classification":
         from torchvision.models import resnet50, ResNet50_Weights
@@ -111,6 +115,7 @@ def load_high_level_net(args, device='cuda'):
         preprocess = weights.transforms()
         resnet = resnet50(weights=weights)
         resnet.eval()
+        # 返回预训练网络，预处理操作，分类的类别
         return resnet, preprocess, weights.meta["categories"]
     elif args.high_level_info == "detection":
         from annotator.yolo import YoLoDetection
@@ -136,14 +141,20 @@ def get_validation_prompt(args, image, model, preprocess, category, device='cuda
 
     if args.high_level_info == "classification":
         batch = preprocess(image).unsqueeze(0)
+        # prediction 返回图像每个类别的概率值 softmax归一化
         prediction = model(batch).squeeze(0).softmax(0)
+        # 概率最大的类别索引
         class_id = prediction.argmax().item()
+        # 最大的概率值
         score = prediction[class_id].item()
         category_name = category[class_id]
         #print(f"{category_name}: {100 * score:.1f}%")
+        # 概率值要大于0.1
         if score >= 0.1:
+            # 添加的prompt用逗号隔开
             validation_prompt = f"{category_name}, " if args.prompt=="" else f"{args.prompt}, {category_name}, "
     elif args.high_level_info == "detection":
+        # 返回类别索引，置信度和类别名
         clses, confs, names = model.detect(image)
         #print(cls, conf, names)
         count = {}
@@ -180,21 +191,28 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
     )
 
     # If passed along, set the training seed now.
+    # 随机种子
     if args.seed is not None:
         set_seed(args.seed)
 
     # Handle the output folder creation
+    # 输出文件夹
+    # 只有主进程才执行这个命令，避免多个进程重复执行
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
+    # 初始化日志追踪器
     if accelerator.is_main_process:
         accelerator.init_trackers("PASD")
 
+    # 加载diffusion的pipeline
     pipeline = load_pasd_pipeline(args, accelerator, enable_xformers_memory_efficient_attention)
+    # 加载用来生成prompt的high-level预训练模型    包括模型，预处理，类别(分类会用到)
     model, preprocess, category = load_high_level_net(args, accelerator.device)
 
+    # 输入图片大小
     resize_preproc = transforms.Compose([
         transforms.Resize(args.process_size, interpolation=transforms.InterpolationMode.BILINEAR),
     ] if args.control_type=="realisr" else [
@@ -206,7 +224,9 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
         if args.seed is not None:
             generator.manual_seed(args.seed)
 
+        # 输入图片路径
         if os.path.isdir(args.image_path):
+            # 子文件夹下所有有后缀名的文件
             image_names = sorted(glob.glob(f'{args.image_path}/*.*'))
         else:
             image_names = [args.image_path]
@@ -219,7 +239,9 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
                 validation_prompt += args.added_prompt # clean, extremely detailed, best quality, sharp, clean
                 negative_prompt = args.negative_prompt #dirty, messy, low quality, frames, deformed, 
             elif args.control_type == "grayscale":
+                # 灰度图转RGB
                 validation_image = validation_image.convert("L").convert("RGB")
+                # 记录原始图像
                 orig_img = validation_image.copy()
                 validation_prompt = get_validation_prompt(args, validation_image, model, preprocess, category, accelerator.device)
                 validation_prompt = validation_prompt.replace("black and white", "color")
@@ -238,6 +260,7 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
             if min(validation_image.size) < args.process_size or args.control_type=="grayscale":
                 validation_image = resize_preproc(validation_image)
 
+            # 分辨率调整为8的倍数
             validation_image = validation_image.resize((validation_image.size[0]//8*8, validation_image.size[1]//8*8))
             #width, height = validation_image.size
             resize_flag = True #
@@ -253,6 +276,7 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
 
             if args.control_type=="realisr": 
                 if True: #args.conditioning_scale < 1.0:
+                    # 调整颜色
                     image = wavelet_color_fix(image, validation_image)
 
                 if resize_flag: 
@@ -260,13 +284,19 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
 
             name, ext = os.path.splitext(os.path.basename(image_name))
             if args.control_type=='grayscale':
+                # 结果图像 RGB->BGR
                 np_image = np.asarray(image)[:,:,::-1]
                 color_np = cv2.resize(np_image, orig_img.size)
                 orig_np = np.asarray(orig_img)
+                # YUV空间可以把亮度和颜色分开，Y是亮度
+                # 结果图像 BGR->YUV
                 color_yuv = cv2.cvtColor(color_np, cv2.COLOR_BGR2YUV)
+                # 原始图像 BGR->YUV
                 orig_yuv = cv2.cvtColor(orig_np, cv2.COLOR_BGR2YUV)
                 hires = np.copy(orig_yuv)
+                # 原始图像的U和V复制输出图像的
                 hires[:, :, 1:3] = color_yuv[:, :, 1:3]
+                # YUV->BGR
                 np_image = cv2.cvtColor(hires, cv2.COLOR_YUV2BGR)
                 cv2.imwrite(f'{args.output_dir}/{name}.png', np_image)
             else:
@@ -279,6 +309,7 @@ if __name__ == "__main__":
     parser.add_argument("--pasd_model_path", type=str, default="runs/pasd/checkpoint-100000", help="path of PASD model")
     parser.add_argument("--personalized_model_path", type=str, default="majicmixRealistic_v7.safetensors", help="name of personalized dreambooth model, path is 'checkpoints/personalized_models'") # toonyou_beta3.safetensors, majicmixRealistic_v6.safetensors, unet_disney
     parser.add_argument("--control_type", choices=['realisr', 'grayscale'], nargs='?', default="realisr", help="task name")
+    # high_level_info只能选择一个
     parser.add_argument('--high_level_info', choices=['classification', 'detection', 'caption'], nargs='?', default='caption', help="high level information for prompt generation")
     parser.add_argument("--prompt", type=str, default="", help="prompt for image generation")
     parser.add_argument("--added_prompt", type=str, default="clean, high-resolution, 8k", help="additional prompt")
@@ -291,6 +322,7 @@ if __name__ == "__main__":
     parser.add_argument("--blending_alpha", type=float, default=1.0, help="blending alpha for personalized model")
     parser.add_argument("--multiplier", type=float, default=0.6, help="multiplier for personalized lora model")
     parser.add_argument("--num_inference_steps", type=int, default=20, help="denoising steps")
+    # 输入图片大小
     parser.add_argument("--process_size", type=int, default=768, help="minimal input size for processing") # 512?
     parser.add_argument("--decoder_tiled_size", type=int, default=224, help="decoder tile size for saving GPU memory") # for 24G
     parser.add_argument("--encoder_tiled_size", type=int, default=1024, help="encoder tile size for saving GPU memory") # for 24G
