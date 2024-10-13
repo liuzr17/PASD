@@ -603,6 +603,7 @@ def main(args):
                 repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
             ).repo_id
 
+    # 分词器
     # Load the tokenizer
     if args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
@@ -614,19 +615,24 @@ def main(args):
             use_fast=False,
         )
 
+    # 文本编码器类
     # import correct text encoder class
     text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
     # Load scheduler and models
+    # 噪声调度器
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    # 文本编码器、vae、unet
     text_encoder = text_encoder_cls.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
     )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
+    # unet为什么可以直接加载，他没有改结构吗
     unet = UNet2DConditionModel.from_pretrained_orig(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
     )
 
+    # 是否存在预训练的controlnet权重  否则复制unet
     if args.controlnet_model_name_or_path:
         logger.info("Loading existing controlnet weights")
         controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
@@ -672,6 +678,7 @@ def main(args):
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    # 冻结unet 训练controlnet
     controlnet.train()
     """
     for name, module in unet.named_modules():
@@ -680,6 +687,11 @@ def main(args):
             for params in module.parameters():
                 params.requires_grad = True
     """
+    # parser.add_argument('--trainable_modules', nargs='*', type=str, default=["pixel_attentions", "norm2_plus", "attn2_plus", "proj_in_plus"])
+    # nargs='*'指可以传入0个或多个参数
+    # 默认有"pixel_attentions", "norm2_plus", "attn2_plus", "proj_in_plus"这4个模块
+    # unet里一部分模型可训练
+    # 奇怪，那为什么unet可以从sd1.5里加载预训练权重呢
     for name, param in unet.named_parameters():
         for trainable_module_name in args.trainable_modules:
             if trainable_module_name in name:
@@ -925,6 +937,7 @@ def main(args):
                 controlnet_image = conditioning_pixel_values.to(accelerator.device, dtype=weight_dtype, non_blocking=True)
                 #print(pixel_values.shape, latents.shape, encoder_hidden_states.shape, controlnet_image.shape)
 
+                # controlnet_cond_mid是初步去除退化的图像
                 controlnet_cond_mid, down_block_res_samples, mid_block_res_sample = controlnet(
                     noisy_latents,
                     timesteps,
@@ -954,6 +967,7 @@ def main(args):
                 if controlnet_cond_mid is not None:
                     if isinstance(controlnet_cond_mid, list):
                         for values in controlnet_cond_mid:
+                            # 计算groundtruth和初步去除退化图像的l1损失
                             loss += F.l1_loss(F.interpolate(pixel_values, size=values.shape[-2:], mode='bilinear').float(), values.float(), reduction="mean")
                             if args.control_type == "grayscale":
                                 loss_colorful = sum([colorful_loss(values) for values in controlnet_cond_mid])
